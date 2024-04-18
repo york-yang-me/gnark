@@ -2,6 +2,7 @@ package test
 
 import (
 	"crypto/rand"
+	eccTest "github.com/consensys/gnark/ecc"
 	"math/big"
 	mrand "math/rand"
 	"reflect"
@@ -68,13 +69,29 @@ func init() {
 
 type filler func(frontend.Circuit, ecc.ID)
 
+type filler2 func(frontend.Circuit, eccTest.ID)
+
 func zeroFiller(w frontend.Circuit, curve ecc.ID) {
 	fill(w, func() interface{} {
 		return 0
 	})
 }
 
+func zeroFiller2(w frontend.Circuit, curve eccTest.ID) {
+	fill(w, func() interface{} {
+		return 0
+	})
+}
+
 func binaryFiller(w frontend.Circuit, curve ecc.ID) {
+	mrand := mrand.New(mrand.NewSource(time.Now().Unix())) //#nosec G404 weak rng is fine here
+
+	fill(w, func() interface{} {
+		return int(mrand.Uint32() % 2) //#nosec G404 weak rng is fine here
+	})
+}
+
+func binaryFiller2(w frontend.Circuit, curve eccTest.ID) {
 	mrand := mrand.New(mrand.NewSource(time.Now().Unix())) //#nosec G404 weak rng is fine here
 
 	fill(w, func() interface{} {
@@ -95,7 +112,36 @@ func seedFiller(w frontend.Circuit, curve ecc.ID) {
 	})
 }
 
+func seedFiller2(w frontend.Circuit, curve eccTest.ID) {
+
+	mrand := mrand.New(mrand.NewSource(time.Now().Unix())) //#nosec G404 weak rng is fine here
+
+	m := curve.ScalarField()
+
+	fill(w, func() interface{} {
+		i := int(mrand.Uint32() % uint32(len(seedCorpus))) //#nosec G404 weak rng is fine here
+		r := new(big.Int).Set(seedCorpus[i])
+		return r.Mod(r, m)
+	})
+}
+
 func randomFiller(w frontend.Circuit, curve ecc.ID) {
+
+	r := mrand.New(mrand.NewSource(time.Now().Unix())) //#nosec G404 weak rng is fine here
+	m := curve.ScalarField()
+
+	fill(w, func() interface{} {
+		i := int(mrand.Uint32() % uint32(len(seedCorpus)*2)) //#nosec G404 weak rng is fine here
+		if i >= len(seedCorpus) {
+			b1, _ := rand.Int(r, m) //#nosec G404 weak rng is fine here
+			return b1
+		}
+		r := new(big.Int).Set(seedCorpus[i])
+		return r.Mod(r, m)
+	})
+}
+
+func randomFiller2(w frontend.Circuit, curve eccTest.ID) {
 
 	r := mrand.New(mrand.NewSource(time.Now().Unix())) //#nosec G404 weak rng is fine here
 	m := curve.ScalarField()
@@ -168,6 +214,42 @@ func (assert *Assert) Fuzz(circuit frontend.Circuit, fuzzCount int, opts ...Test
 	}
 }
 
+func (assert *Assert) Fuzz2(circuit frontend.Circuit, fuzzCount int, opts ...TestingOption2) {
+	opt := assert.options2(opts...)
+
+	// first we clone the circuit
+	// then we parse the frontend.Variable and set them to a random value  or from our interesting pool
+	// (% of allocations to be tuned)
+	w := shallowClone(circuit)
+
+	fillers := []filler2{randomFiller2, binaryFiller2, seedFiller2}
+
+	for _, curve := range opt.curves {
+		for _, b := range opt.backends {
+			curve := curve
+			b := b
+			assert.Run(func(assert *Assert) {
+				// this puts the compiled circuit in the cache
+				// we do this here in case our fuzzWitness method mutates some references in the circuit
+				// (like []frontend.Variable) before cleaning up
+				_, err := assert.compile2(circuit, curve, b, opt.compileOpts)
+				assert.NoError(err)
+				valid := 0
+				// "fuzz" with zeros
+				valid += assert.fuzzer2(zeroFiller2, circuit, w, b, curve, &opt)
+
+				for i := 0; i < fuzzCount; i++ {
+					for _, f := range fillers {
+						valid += assert.fuzzer2(f, circuit, w, b, curve, &opt)
+					}
+				}
+
+			}, curve.String(), b.String())
+
+		}
+	}
+}
+
 func (assert *Assert) fuzzer(fuzzer filler, circuit, w frontend.Circuit, b backend.ID, curve ecc.ID, opt *testingConfig) int {
 	// fuzz a witness
 	fuzzer(w, curve)
@@ -206,6 +288,44 @@ func (assert *Assert) fuzzer(fuzzer filler, circuit, w frontend.Circuit, b backe
 	return 0
 }
 
+func (assert *Assert) fuzzer2(fuzzer filler2, circuit, w frontend.Circuit, b backend.ID, curve eccTest.ID, opt *testingConfig2) int {
+	// fuzz a witness
+	fuzzer(w, curve)
+
+	errVars := IsSolved(circuit, w, curve.ScalarField())
+	errConsts := IsSolved(circuit, w, curve.ScalarField(), SetAllVariablesAsConstants())
+
+	if (errVars == nil) != (errConsts == nil) {
+		w, err := frontend.NewWitness(w, curve.ScalarField())
+		if err != nil {
+			panic(err)
+		}
+		s, err := frontend.NewSchema(circuit)
+		if err != nil {
+			panic(err)
+		}
+		bb, err := w.ToJSON(s)
+		if err != nil {
+			panic(err)
+		}
+
+		assert.Log("errVars", errVars)
+		assert.Log("errConsts", errConsts)
+		assert.Log("fuzzer witness", string(bb))
+		assert.FailNow("solving circuit with values as constants vs non-constants mismatched result")
+	}
+
+	if errVars == nil && errConsts == nil {
+		// valid witness
+		assert.solvingSucceeded2(circuit, w, b, curve, opt)
+		return 1
+	}
+
+	// invalid witness
+	assert.solvingFailed2(circuit, w, b, curve, opt)
+	return 0
+}
+
 func (assert *Assert) solvingSucceeded(circuit frontend.Circuit, validAssignment frontend.Circuit, b backend.ID, curve ecc.ID, opt *testingConfig) {
 	// parse assignment
 	w := assert.parseAssignment(circuit, validAssignment, curve, opt.checkSerialization)
@@ -214,6 +334,25 @@ func (assert *Assert) solvingSucceeded(circuit frontend.Circuit, validAssignment
 
 	// 1- compile the circuit
 	ccs, err := assert.compile(circuit, curve, b, opt.compileOpts)
+	checkError(err)
+
+	// must not error with big int test engine
+	err = IsSolved(circuit, validAssignment, curve.ScalarField())
+	checkError(err)
+
+	err = ccs.IsSolved(w.full, opt.solverOpts...)
+	checkError(err)
+
+}
+
+func (assert *Assert) solvingSucceeded2(circuit frontend.Circuit, validAssignment frontend.Circuit, b backend.ID, curve eccTest.ID, opt *testingConfig2) {
+	// parse assignment
+	w := assert.parseAssignment2(circuit, validAssignment, curve, opt.checkSerialization)
+
+	checkError := func(err error) { assert.noError(err, &w) }
+
+	// 1- compile the circuit
+	ccs, err := assert.compile2(circuit, curve, b, opt.compileOpts)
 	checkError(err)
 
 	// must not error with big int test engine
@@ -234,6 +373,26 @@ func (assert *Assert) solvingFailed(circuit frontend.Circuit, invalidAssignment 
 
 	// 1- compile the circuit
 	ccs, err := assert.compile(circuit, curve, b, opt.compileOpts)
+	checkError(err)
+
+	// must error with big int test engine
+	err = IsSolved(circuit, invalidAssignment, curve.ScalarField())
+	mustError(err)
+
+	err = ccs.IsSolved(w.full, opt.solverOpts...)
+	mustError(err)
+
+}
+
+func (assert *Assert) solvingFailed2(circuit frontend.Circuit, invalidAssignment frontend.Circuit, b backend.ID, curve eccTest.ID, opt *testingConfig2) {
+	// parse assignment
+	w := assert.parseAssignment2(circuit, invalidAssignment, curve, opt.checkSerialization)
+
+	checkError := func(err error) { assert.noError(err, &w) }
+	mustError := func(err error) { assert.error(err, &w) }
+
+	// 1- compile the circuit
+	ccs, err := assert.compile2(circuit, curve, b, opt.compileOpts)
 	checkError(err)
 
 	// must error with big int test engine

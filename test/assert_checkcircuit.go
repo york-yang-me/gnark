@@ -2,6 +2,7 @@ package test
 
 import (
 	"crypto/sha256"
+	eccTest "github.com/consensys/gnark/ecc"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend"
@@ -182,6 +183,157 @@ func (assert *Assert) CheckCircuit(circuit frontend.Circuit, opts ...TestingOpti
 	}
 }
 
+func (assert *Assert) CheckCircuit2(circuit frontend.Circuit, opts ...TestingOption2) {
+	// get the testing configuration
+	opt := assert.options2(opts...)
+
+	// for each {curve, backend} tuple
+	for _, curve := range opt.curves {
+		curve := curve
+
+		// run in sub-test to contextualize with curve
+		assert.Run(func(assert *Assert) {
+
+			// parse valid / invalid assignments
+			var invalidWitnesses, validWitnesses []_witness
+			for _, a := range opt.validAssignments {
+				w := assert.parseAssignment2(circuit, a, curve, opt.checkSerialization)
+				validWitnesses = append(validWitnesses, w)
+
+				// check that the assignment is valid with the test engine
+				if !opt.skipTestEngine {
+					err := IsSolved(circuit, w.assignment, curve.ScalarField())
+					assert.noError(err, &w)
+				}
+			}
+
+			for _, a := range opt.invalidAssignments {
+				w := assert.parseAssignment2(circuit, a, curve, opt.checkSerialization)
+				invalidWitnesses = append(invalidWitnesses, w)
+
+				// check that the assignment is invalid with the test engine
+				if !opt.skipTestEngine {
+					err := IsSolved(circuit, w.assignment, curve.ScalarField())
+					assert.error(err, &w)
+				}
+			}
+
+			// for each backend; compile, prove/verify or solve, check serialization if needed.
+			for _, b := range opt.backends {
+				b := b
+
+				// run in sub-test to contextualize with backend
+				assert.Run(func(assert *Assert) {
+
+					// 1- check that the circuit compiles
+					ccs, err := assert.compile2(circuit, curve, b, opt.compileOpts)
+					assert.noError(err, nil)
+
+					// TODO @gbotrel check serialization round trip with constraint system.
+
+					// 2- if we are not running the full prover;
+					// we need to run the solver on the constraint system only
+					if !opt.checkProver {
+						for _, w := range invalidWitnesses {
+							w := w
+							assert.Run(func(assert *Assert) {
+								_, err = ccs.Solve(w.full, opt.solverOpts...)
+								assert.error(err, &w)
+							}, "invalid_witness")
+						}
+
+						for _, w := range validWitnesses {
+							w := w
+							assert.Run(func(assert *Assert) {
+								_, err = ccs.Solve(w.full, opt.solverOpts...)
+								assert.noError(err, &w)
+							}, "valid_witness")
+						}
+
+						return
+					}
+
+					// we need to run the setup, prove and verify and check serialization
+					assert.t.Parallel()
+
+					var concreteBackend tBackend2
+
+					switch b {
+					case backend.GROTH16:
+						concreteBackend = _groth16Test
+					default:
+						panic("backend not implemented")
+					}
+
+					// proof system setup.
+					pk, vk, pkBuilder, vkBuilder, proofBuilder, err := concreteBackend.setup(ccs, curve)
+					assert.noError(err, nil)
+
+					// for each valid witness, run the prover and verifier
+					for _, w := range validWitnesses {
+						w := w
+						assert.Run(func(assert *Assert) {
+							checkSolidity := opt.checkSolidity
+							proverOpts := opt.proverOpts
+							verifierOpts := opt.verifierOpts
+							if b == backend.GROTH16 {
+								// currently groth16 Solidity checker only supports circuits with up to 1 commitment
+								checkSolidity = checkSolidity && (len(ccs.GetCommitments().CommitmentIndexes()) <= 1)
+								// additionally, we use sha256 as hash to field (fixed in Solidity contract)
+								proverOpts = append(proverOpts, backend.WithProverHashToFieldFunction(sha256.New()))
+								verifierOpts = append(verifierOpts, backend.WithVerifierHashToFieldFunction(sha256.New()))
+							}
+							proof, err := concreteBackend.prove(ccs, pk, w.full, proverOpts...)
+							assert.noError(err, &w)
+
+							err = concreteBackend.verify(proof, vk, w.public, verifierOpts...)
+							assert.noError(err, &w)
+
+							if checkSolidity {
+								// check that the proof can be verified by gnark-solidity-checker
+								if _vk, ok := vk.(verifyingKey); ok {
+									assert.Run(func(assert *Assert) {
+										assert.solidityVerification(b, _vk, proof, w.public)
+									}, "solidity")
+								}
+							}
+
+							// check proof serialization
+							assert.roundTripCheck(proof, proofBuilder, "proof")
+						}, "valid_witness")
+					}
+
+					// for each invalid witness, run the prover only, it should fail.
+					for _, w := range invalidWitnesses {
+						w := w
+						assert.Run(func(assert *Assert) {
+							_, err := concreteBackend.prove(ccs, pk, w.full, opt.proverOpts...)
+							assert.error(err, &w)
+						}, "invalid_witness")
+					}
+
+					// check serialization of proving and verifying keys
+					if opt.checkSerialization && ccs.GetNbConstraints() <= serializationThreshold && (curve == eccTest.BLS12_381) {
+						assert.roundTripCheck(pk, pkBuilder, "proving_key")
+						assert.roundTripCheck(vk, vkBuilder, "verifying_key")
+					}
+
+				}, b.String())
+			}
+
+		}, curve.String())
+	}
+
+	// TODO @gbotrel revisit this.
+	if false && opt.fuzzing {
+		// TODO may not be the right place, but ensures all our tests call these minimal tests
+		// (like filling a witness with zeroes, or binary values, ...)
+		assert.Run(func(assert *Assert) {
+			assert.Fuzz2(circuit, 5, opts...)
+		}, "fuzz")
+	}
+}
+
 type _witness struct {
 	full       witness.Witness
 	public     witness.Witness
@@ -229,7 +381,52 @@ func (assert *Assert) parseAssignment(circuit frontend.Circuit, assignment front
 	return _witness{full: full, public: public, assignment: assignment}
 }
 
+func (assert *Assert) parseAssignment2(circuit frontend.Circuit, assignment frontend.Circuit, curve eccTest.ID, checkSerialization bool) _witness {
+	if assignment == nil {
+		return _witness{}
+	}
+	full, err := frontend.NewWitness(assignment, curve.ScalarField())
+	assert.NoError(err, "can't parse assignment into full witness")
+
+	public, err := frontend.NewWitness(assignment, curve.ScalarField(), frontend.PublicOnly())
+	assert.NoError(err, "can't parse assignment into public witness")
+
+	if checkSerialization {
+		witnessBuilder := func() any {
+			w, err := witness.New(curve.ScalarField())
+			if err != nil {
+				panic(err)
+			}
+			return w
+		}
+		assert.roundTripCheck(full, witnessBuilder, "witness", "full")
+		assert.roundTripCheck(public, witnessBuilder, "witness", "public")
+
+		// count number of element in witness.
+		// if too many, we don't do JSON serialization.
+		s, err := schema.Walk(assignment, tVariable, nil)
+		assert.NoError(err)
+
+		if s.Public+s.Secret <= serializationThreshold {
+			assert.Run(func(assert *Assert) {
+				s := lazySchema(circuit)()
+				assert.marshalWitnessJSON2(full, s, curve, false)
+			}, curve.String(), "marshal/json")
+			assert.Run(func(assert *Assert) {
+				s := lazySchema(circuit)()
+				assert.marshalWitnessJSON2(public, s, curve, true)
+			}, curve.String(), "marshal-public/json")
+		}
+	}
+
+	return _witness{full: full, public: public, assignment: assignment}
+}
+
 type fnSetup func(ccs constraint.ConstraintSystem, curve ecc.ID) (
+	pk, vk any,
+	pkBuilder, vkBuilder, proofBuilder func() any,
+	err error)
+type fnSetup2 func(ccs constraint.ConstraintSystem, curve eccTest.ID) (
 	pk, vk any,
 	pkBuilder, vkBuilder, proofBuilder func() any,
 	err error)
@@ -239,6 +436,12 @@ type fnVerify func(proof, vk any, publicWitness witness.Witness, opts ...backend
 // tBackend abstracts the backend implementation in the test package.
 type tBackend struct {
 	setup  fnSetup
+	prove  fnProve
+	verify fnVerify
+}
+
+type tBackend2 struct {
+	setup  fnSetup2
 	prove  fnProve
 	verify fnVerify
 }
@@ -277,6 +480,22 @@ var (
 		},
 		verify: func(proof, vk any, publicWitness witness.Witness, opts ...backend.VerifierOption) error {
 			return plonk.Verify(proof.(plonk.Proof), vk.(plonk.VerifyingKey), publicWitness, opts...)
+		},
+	}
+
+	_groth16Test = tBackend2{
+		setup: func(ccs constraint.ConstraintSystem, curve eccTest.ID) (
+			pk, vk any,
+			pkBuilder, vkBuilder, proofBuilder func() any,
+			err error) {
+			pk, vk, err = groth16.Setup(ccs)
+			return pk, vk, func() any { return groth16.NewProvingKey(ecc.ID(curve)) }, func() any { return groth16.NewVerifyingKey(ecc.ID(curve)) }, func() any { return groth16.NewProof(ecc.ID(curve)) }, err
+		},
+		prove: func(ccs constraint.ConstraintSystem, pk any, fullWitness witness.Witness, opts ...backend.ProverOption) (proof any, err error) {
+			return groth16.Prove(ccs, pk.(groth16.ProvingKey), fullWitness, opts...)
+		},
+		verify: func(proof, vk any, publicWitness witness.Witness, opts ...backend.VerifierOption) error {
+			return groth16.Verify(proof.(groth16.Proof), vk.(groth16.VerifyingKey), publicWitness, opts...)
 		},
 	}
 )

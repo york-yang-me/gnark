@@ -2,14 +2,18 @@ package kzg_test
 
 import (
 	"crypto/rand"
-
 	"github.com/consensys/gnark-crypto/ecc"
-	fr_bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
-	kzg_bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/kzg"
+
+	//fr_bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/fr"
+	//kzg_bls12377 "github.com/consensys/gnark-crypto/ecc/bls12-377/kzg"
+	fr_bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
+	kzg_bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381/kzg"
 	"github.com/consensys/gnark/backend/groth16"
+	eccTest "github.com/consensys/gnark/ecc"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/r1cs"
-	"github.com/consensys/gnark/std/algebra/native/sw_bls12377"
+	//"github.com/consensys/gnark/std/algebra/native/sw_bls12377"
+	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
 	"github.com/consensys/gnark/std/commitments/kzg"
 )
 
@@ -29,77 +33,77 @@ func Example_native() {
 	)
 
 	// create new SRS for example purposes (NB! UNSAFE!)
-	alpha, err := rand.Int(rand.Reader, ecc.BLS12_377.ScalarField())
+	alpha, err := rand.Int(rand.Reader, ecc.BLS12_381.ScalarField())
 	if err != nil {
 		panic("sampling alpha failed: " + err.Error())
 	}
-	srs, err := kzg_bls12377.NewSRS(kzgSize, alpha) // UNSAFE!
+	srs, err := kzg_bls12381.NewSRS(kzgSize, alpha) // UNSAFE!
 	if err != nil {
 		panic("new SRS failed: " + err.Error())
 	}
 
 	// sample the random polynomial by sampling the coefficients.
-	f := make([]fr_bls12377.Element, polynomialSize)
+	f := make([]fr_bls12381.Element, polynomialSize)
 	for i := range f {
 		f[i].SetRandom()
 	}
 
 	// natively commit to the polynomial using SRS
-	com, err := kzg_bls12377.Commit(f, srs.Pk)
+	com, err := kzg_bls12381.Commit(f, srs.Pk)
 	if err != nil {
 		panic("commitment failed: " + err.Error())
 	}
 
 	// sample random evaluation point
-	var point fr_bls12377.Element
+	var point fr_bls12381.Element
 	point.SetRandom()
 
 	// construct a proof of correct opening. The evaluation value is proof.ClaimedValue
-	proof, err := kzg_bls12377.Open(f, point, srs.Pk)
+	proof, err := kzg_bls12381.Open(f, point, srs.Pk)
 	if err != nil {
 		panic("test opening failed: " + err.Error())
 	}
 
 	// test opening proof natively
-	if err = kzg_bls12377.Verify(&com, &proof, point, srs.Vk); err != nil {
+	if err = kzg_bls12381.Verify(&com, &proof, point, srs.Vk); err != nil {
 		panic("test verify failed: " + err.Error())
 	}
 
 	// create a witness element of the commitment
-	wCmt, err := kzg.ValueOfCommitment[sw_bls12377.G1Affine](com)
+	wCmt, err := kzg.ValueOfCommitment[sw_bls12381.G1Affine](com)
 	if err != nil {
 		panic("commitment witness failed: " + err.Error())
 	}
 
 	// create a witness element of the opening proof
-	wProof, err := kzg.ValueOfOpeningProof[sw_bls12377.ScalarField, sw_bls12377.G1Affine](proof)
+	wProof, err := kzg.ValueOfOpeningProof[sw_bls12381.ScalarField, sw_bls12381.G1Affine](proof)
 	if err != nil {
 		panic("opening proof witness failed: " + err.Error())
 	}
 
 	// create a witness element of the SRS
-	wVk, err := kzg.ValueOfVerifyingKey[sw_bls12377.G1Affine, sw_bls12377.G2Affine](srs.Vk)
+	wVk, err := kzg.ValueOfVerifyingKey[sw_bls12381.G1Affine, sw_bls12381.G2Affine](srs.Vk)
 	if err != nil {
 		panic("verifying key witness failed: " + err.Error())
 	}
 
 	// create a witness element of the evaluation point
-	wPt, err := kzg.ValueOfScalar[sw_bls12377.ScalarField](point)
+	wPt, err := kzg.ValueOfScalar[sw_bls12381.ScalarField](point)
 	if err != nil {
 		panic("point witness failed: " + err.Error())
 	}
 
-	assignment := KZGVerificationCircuit[sw_bls12377.ScalarField, sw_bls12377.G1Affine, sw_bls12377.G2Affine, sw_bls12377.GT]{
+	assignment := KZGVerificationCircuit[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine, sw_bls12381.GTEl]{
 		VerifyingKey: wVk,
 		Commitment:   wCmt,
 		OpeningProof: wProof,
 		Point:        wPt,
 	}
-	circuit := KZGVerificationCircuit[sw_bls12377.ScalarField, sw_bls12377.G1Affine, sw_bls12377.G2Affine, sw_bls12377.GT]{}
+	circuit := KZGVerificationCircuit[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine, sw_bls12381.GTEl]{}
 
 	// because we are using 2-chains then the outer curve must correspond to the
-	// inner curve. For inner BLS12-377 the outer curve is BW6-761.
-	ccs, err := frontend.Compile(ecc.BW6_761.ScalarField(), r1cs.NewBuilder, &circuit)
+	// inner curve. For inner BLS12-381 the outer curve is BW6-767.
+	ccs, err := frontend.Compile(eccTest.BW6_767.ScalarField(), r1cs.NewBuilder, &circuit)
 	if err != nil {
 		panic("compile failed: " + err.Error())
 	}
@@ -111,7 +115,7 @@ func Example_native() {
 	}
 
 	// create prover witness from the assignment
-	secretWitness, err := frontend.NewWitness(&assignment, ecc.BW6_761.ScalarField())
+	secretWitness, err := frontend.NewWitness(&assignment, eccTest.BW6_767.ScalarField())
 	if err != nil {
 		panic("secret witness failed: " + err.Error())
 	}

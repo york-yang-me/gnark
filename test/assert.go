@@ -19,6 +19,7 @@ package test
 import (
 	"errors"
 	"fmt"
+	eccTest "github.com/consensys/gnark/ecc"
 	"reflect"
 	"strings"
 	"testing"
@@ -155,6 +156,34 @@ func (assert *Assert) compile(circuit frontend.Circuit, curveID ecc.ID, backendI
 	return ccs, nil
 }
 
+func (assert *Assert) compile2(circuit frontend.Circuit, curveID eccTest.ID, backendID backend.ID, compileOpts []frontend.CompileOption) (constraint.ConstraintSystem, error) {
+	var newBuilder frontend.NewBuilder
+
+	switch backendID {
+	case backend.GROTH16:
+		newBuilder = r1cs.NewBuilder
+	default:
+		panic("not implemented")
+	}
+
+	// else compile it and ensure it is deterministic
+	ccs, err := frontend.Compile(curveID.ScalarField(), newBuilder, circuit, compileOpts...)
+	if err != nil {
+		return nil, err
+	}
+
+	_ccs, err := frontend.Compile(curveID.ScalarField(), newBuilder, circuit, compileOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrCompilationNotDeterministic, err)
+	}
+
+	if !reflect.DeepEqual(ccs, _ccs) {
+		return nil, ErrCompilationNotDeterministic
+	}
+
+	return ccs, nil
+}
+
 // error ensure the error is set, else fails the test
 // add a witness to the error message if provided
 func (assert *Assert) error(err error, w *_witness) {
@@ -199,6 +228,27 @@ func (assert *Assert) noError(err error, w *_witness) {
 }
 
 func (assert *Assert) marshalWitnessJSON(w witness.Witness, s *schema.Schema, curveID ecc.ID, publicOnly bool) {
+	var err error
+	if publicOnly {
+		w, err = w.Public()
+		assert.NoError(err)
+	}
+
+	// serialize the vector to binary
+	data, err := w.ToJSON(s)
+	assert.NoError(err)
+
+	// re-read
+	witness, err := witness.New(curveID.ScalarField())
+	assert.NoError(err)
+	err = witness.FromJSON(s, data)
+	assert.NoError(err)
+
+	witnessMatch := reflect.DeepEqual(w, witness)
+	assert.True(witnessMatch, "round trip marshaling failed")
+}
+
+func (assert *Assert) marshalWitnessJSON2(w witness.Witness, s *schema.Schema, curveID eccTest.ID, publicOnly bool) {
 	var err error
 	if publicOnly {
 		w, err = w.Public()

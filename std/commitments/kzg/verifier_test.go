@@ -3,6 +3,7 @@ package kzg
 import (
 	"crypto/rand"
 	"fmt"
+	eccTest "github.com/consensys/gnark/ecc"
 	"math/big"
 	"testing"
 
@@ -356,6 +357,50 @@ func TestKZGVerificationTwoChain2(t *testing.T) {
 	}
 
 	assert.CheckCircuit(&KZGVerificationCircuit[sw_bls24315.ScalarField, sw_bls24315.G1Affine, sw_bls24315.G2Affine, sw_bls24315.GT]{}, test.WithValidAssignment(&assignment), test.WithCurves(ecc.BW6_633))
+}
+
+func TestKZGVerificationTwoChain3(t *testing.T) {
+	assert := test.NewAssert(t)
+
+	alpha, err := rand.Int(rand.Reader, ecc.BLS12_381.ScalarField())
+	assert.NoError(err)
+	srs, err := kzg_bls12381.NewSRS(kzgSize, alpha)
+	assert.NoError(err)
+
+	f := make([]fr_bls12381.Element, polynomialSize)
+	for i := range f {
+		f[i].SetRandom()
+	}
+
+	com, err := kzg_bls12381.Commit(f, srs.Pk)
+	assert.NoError(err)
+
+	var point fr_bls12381.Element
+	point.SetRandom()
+	proof, err := kzg_bls12381.Open(f, point, srs.Pk)
+	assert.NoError(err)
+
+	if err = kzg_bls12381.Verify(&com, &proof, point, srs.Vk); err != nil {
+		t.Fatal("verify proof", err)
+	}
+
+	wCmt, err := ValueOfCommitment[sw_bls12381.G1Affine](com)
+	assert.NoError(err)
+	wProof, err := ValueOfOpeningProof[sw_bls12381.ScalarField, sw_bls12381.G1Affine](proof)
+	assert.NoError(err)
+	wVk, err := ValueOfVerifyingKey[sw_bls12381.G1Affine, sw_bls12381.G2Affine](srs.Vk)
+	assert.NoError(err)
+	wPt, err := ValueOfScalar[sw_bls12381.ScalarField](point)
+	assert.NoError(err)
+
+	assignment := KZGVerificationCircuit[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine, sw_bls12381.GTEl]{
+		VerifyingKey: wVk,
+		Commitment:   wCmt,
+		OpeningProof: wProof,
+		Point:        wPt,
+	}
+
+	assert.CheckCircuit2(&KZGVerificationCircuit[sw_bls12381.ScalarField, sw_bls12381.G1Affine, sw_bls12381.G2Affine, sw_bls12381.GTEl]{}, test.WithValidAssignment2(&assignment), test.WithCurves2(eccTest.BW6_767))
 }
 
 func TestValueOfCommitment(t *testing.T) {

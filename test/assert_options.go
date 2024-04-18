@@ -1,6 +1,7 @@
 package test
 
 import (
+	eccTest "github.com/consensys/gnark/ecc"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -13,9 +14,21 @@ import (
 // See the descriptions of functions returning instances of this type for
 // particular options.
 type TestingOption func(*testingConfig) error
+type TestingOption2 func(*testingConfig2) error
 
 type testingConfig struct {
 	profile
+	solverOpts   []solver.Option
+	proverOpts   []backend.ProverOption
+	verifierOpts []backend.VerifierOption
+	compileOpts  []frontend.CompileOption
+
+	validAssignments   []frontend.Circuit
+	invalidAssignments []frontend.Circuit
+}
+
+type testingConfig2 struct {
+	profile2
 	solverOpts   []solver.Option
 	proverOpts   []backend.ProverOption
 	verifierOpts []backend.VerifierOption
@@ -54,9 +67,44 @@ func (assert *Assert) options(opts ...TestingOption) testingConfig {
 	return opt
 }
 
+func (assert *Assert) options2(opts ...TestingOption2) testingConfig2 {
+	var opt testingConfig2
+
+	// default options;
+	// go test -short 					--> testEngineOnly
+	// go test 							--> constraintOnlyProfile
+	// go test -tags=prover_checks 		--> proverOnlyProfile
+	// go test -tags=release_checks 	--> releaseProfile
+
+	if releaseTestFlag {
+		opt.profile2 = releaseChecks2
+	} else if proverTestFlag {
+		opt.profile2 = proverChecks2
+	} else if testing.Short() {
+		opt.profile2 = testEngineChecks2
+	} else {
+		opt.profile2 = constraintSolverChecks2
+	}
+
+	// apply user provided options.
+	for _, option := range opts {
+		err := option(&opt)
+		assert.NoError(err, "parsing TestingOption")
+	}
+
+	return opt
+}
+
 // WithValidAssignment is a testing option which adds a valid assignment
 func WithValidAssignment(validAssignment frontend.Circuit) TestingOption {
 	return func(opt *testingConfig) error {
+		opt.validAssignments = append(opt.validAssignments, validAssignment)
+		return nil
+	}
+}
+
+func WithValidAssignment2(validAssignment frontend.Circuit) TestingOption2 {
+	return func(opt *testingConfig2) error {
 		opt.validAssignments = append(opt.validAssignments, validAssignment)
 		return nil
 	}
@@ -85,6 +133,14 @@ func WithBackends(b backend.ID, backends ...backend.ID) TestingOption {
 func WithCurves(c ecc.ID, curves ...ecc.ID) TestingOption {
 	return func(opt *testingConfig) error {
 		opt.curves = []ecc.ID{c}
+		opt.curves = append(opt.curves, curves...)
+		return nil
+	}
+}
+
+func WithCurves2(c eccTest.ID, curves ...eccTest.ID) TestingOption2 {
+	return func(opt *testingConfig2) error {
+		opt.curves = []eccTest.ID{c}
 		opt.curves = append(opt.curves, curves...)
 		return nil
 	}

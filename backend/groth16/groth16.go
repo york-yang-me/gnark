@@ -20,6 +20,7 @@
 package groth16
 
 import (
+	eccTest "github.com/consensys/gnark/ecc"
 	"io"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -52,6 +53,7 @@ import (
 	icicle_bn254 "github.com/consensys/gnark/backend/groth16/bn254/icicle"
 	groth16_bw6633 "github.com/consensys/gnark/backend/groth16/bw6-633"
 	groth16_bw6761 "github.com/consensys/gnark/backend/groth16/bw6-761"
+	groth16_bw6767 "github.com/consensys/gnark/backend/groth16/bw6-767"
 )
 
 type groth16Object interface {
@@ -350,6 +352,19 @@ func NewProvingKey(curveID ecc.ID) ProvingKey {
 		pk = &groth16_bls24315.ProvingKey{}
 	case ecc.BW6_633:
 		pk = &groth16_bw6633.ProvingKey{}
+	default:
+		panic("not implemented")
+	}
+	return pk
+}
+
+func NewProvingKey2(curveID eccTest.ID) ProvingKey {
+	var pk ProvingKey
+	switch curveID {
+	case eccTest.BLS12_381:
+		pk = &groth16_bls12381.ProvingKey{}
+	case eccTest.BW6_767:
+		pk = &groth16_bw6767.ProvingKey{}
 	default:
 		panic("not implemented")
 	}
